@@ -255,6 +255,7 @@ class Transformer(nn.Module):
         #########################################################
         # Begin Encoder
         #########################################################
+        reference_points = self.encoder.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         memory, memory_text = self.encoder(
             src_flatten,
             pos=lvl_pos_embed_flatten,
@@ -268,6 +269,19 @@ class Transformer(nn.Module):
             position_ids=text_dict["position_ids"],
             text_self_attention_masks=text_dict["text_self_attention_masks"],
         )
+        print("start trace encoder")
+        traced_encoder = torch.jit.trace(self.encoder, (src_flatten,
+                                                        lvl_pos_embed_flatten,
+                                                        spatial_shapes,
+                                                        level_start_index,
+                                                        reference_points,
+                                                        mask_flatten,
+                                                        text_dict["encoded_text"],
+                                                        ~text_dict["text_token_mask"],
+                                                        text_dict["text_self_attention_masks"],
+                                                        text_dict["position_ids"]))
+        traced_encoder.save("traced_encoder.pt")
+        print("end save encoder")
         #########################################################
         # End Encoder
         # - memory: bs, \sum{hw}, c
@@ -375,6 +389,19 @@ class Transformer(nn.Module):
             text_attention_mask=~text_dict["text_token_mask"],
             # we ~ the mask . False means use the token; True means pad the token
         )
+        print("start trace decoder")
+        traced_decoder = torch.jit.trace(self.decoder, (tgt.transpose(0, 1),
+                                                       memory.transpose(0, 1),
+                                                       mask_flatten,
+                                                       lvl_pos_embed_flatten.transpose(0, 1),
+                                                       refpoint_embed.transpose(0, 1),
+                                                       level_start_index,
+                                                       spatial_shapes,
+                                                       valid_ratios,
+                                                       text_dict["encoded_text"],
+                                                       ~text_dict["text_token_mask"],))
+        traced_decoder.save("traced_decoder.pt")
+        print("end save decoder")
         #########################################################
         # End Decoder
         # hs: n_dec, bs, nq, d_model
@@ -486,12 +513,13 @@ class TransformerEncoder(nn.Module):
         pos: Tensor,
         spatial_shapes: Tensor,
         level_start_index: Tensor,
-        valid_ratios: Tensor,
+        #valid_ratios: Tensor,
+        reference_points: Tensor,
         key_padding_mask: Tensor,
         # for texts
         memory_text: Tensor = None,
         text_attention_mask: Tensor = None,
-        pos_text: Tensor = None,
+        #pos_text: Tensor = None,
         text_self_attention_masks: Tensor = None,
         position_ids: Tensor = None,
     ):
@@ -518,11 +546,11 @@ class TransformerEncoder(nn.Module):
 
         output = src
 
-        # preparation and reshape
-        if self.num_layers > 0:
-            reference_points = self.get_reference_points(
-                spatial_shapes, valid_ratios, device=src.device
-            )
+        # # preparation and reshape
+        # if self.num_layers > 0:
+        #     reference_points = self.get_reference_points(
+        #         spatial_shapes, valid_ratios, device=src.device
+        #     )
 
         if self.text_layers:
             # generate pos_text
@@ -548,21 +576,12 @@ class TransformerEncoder(nn.Module):
             #     if os.environ.get('IPDB_SHILONG_DEBUG', None) == 'INFO':
             #         import ipdb; ipdb.set_trace()
             if self.fusion_layers:
-                if self.use_checkpoint:
-                    output, memory_text = checkpoint.checkpoint(
-                        self.fusion_layers[layer_id],
-                        output,
-                        memory_text,
-                        key_padding_mask,
-                        text_attention_mask,
-                    )
-                else:
-                    output, memory_text = self.fusion_layers[layer_id](
-                        v=output,
-                        l=memory_text,
-                        attention_mask_v=key_padding_mask,
-                        attention_mask_l=text_attention_mask,
-                    )
+                output, memory_text = self.fusion_layers[layer_id](
+                    v=output,
+                    l=memory_text,
+                    attention_mask_v=key_padding_mask,
+                    attention_mask_l=text_attention_mask,
+                )
 
             if self.text_layers:
                 memory_text = self.text_layers[layer_id](
@@ -572,26 +591,14 @@ class TransformerEncoder(nn.Module):
                     pos=(pos_text.transpose(0, 1) if pos_text is not None else None),
                 ).transpose(0, 1)
 
-            # main process
-            if self.use_transformer_ckpt:
-                output = checkpoint.checkpoint(
-                    layer,
-                    output,
-                    pos,
-                    reference_points,
-                    spatial_shapes,
-                    level_start_index,
-                    key_padding_mask,
-                )
-            else:
-                output = layer(
-                    src=output,
-                    pos=pos,
-                    reference_points=reference_points,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    key_padding_mask=key_padding_mask,
-                )
+            output = layer(
+                src=output,
+                pos=pos,
+                reference_points=reference_points,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                key_padding_mask=key_padding_mask,
+            )
 
         return output, memory_text
 
@@ -635,9 +642,6 @@ class TransformerDecoder(nn.Module):
         self,
         tgt,
         memory,
-        tgt_mask: Optional[Tensor] = None,
-        memory_mask: Optional[Tensor] = None,
-        tgt_key_padding_mask: Optional[Tensor] = None,
         memory_key_padding_mask: Optional[Tensor] = None,
         pos: Optional[Tensor] = None,
         refpoints_unsigmoid: Optional[Tensor] = None,  # num_queries, bs, 2
@@ -729,11 +733,14 @@ class TransformerDecoder(nn.Module):
                 ref_points.append(new_reference_points)
 
             intermediate.append(self.norm(output))
+        intermediate = [itm_out.transpose(0, 1) for itm_out in intermediate]
+        ref_points = [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points]
 
-        return [
-            [itm_out.transpose(0, 1) for itm_out in intermediate],
-            [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],
-        ]
+        # return [
+        #     [itm_out.transpose(0, 1) for itm_out in intermediate],
+        #     [itm_refpoint.transpose(0, 1) for itm_refpoint in ref_points],
+        # ]
+        return intermediate, ref_points
 
 
 class DeformableTransformerEncoderLayer(nn.Module):

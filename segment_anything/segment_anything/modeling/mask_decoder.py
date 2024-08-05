@@ -10,7 +10,7 @@ from torch.nn import functional as F
 
 from typing import List, Tuple, Type
 
-from .common import LayerNorm2d
+from .common import LayerNorm2d, FastGelu
 
 
 class MaskDecoder(nn.Module):
@@ -53,9 +53,9 @@ class MaskDecoder(nn.Module):
         self.output_upscaling = nn.Sequential(
             nn.ConvTranspose2d(transformer_dim, transformer_dim // 4, kernel_size=2, stride=2),
             LayerNorm2d(transformer_dim // 4),
-            activation(),
+            FastGelu(),
             nn.ConvTranspose2d(transformer_dim // 4, transformer_dim // 8, kernel_size=2, stride=2),
-            activation(),
+            FastGelu(),
         )
         self.output_hypernetworks_mlps = nn.ModuleList(
             [

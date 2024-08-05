@@ -11,7 +11,7 @@ from torch.nn import functional as F
 
 from typing import List, Tuple, Type
 
-from .common import LayerNorm2d
+from .common import LayerNorm2d, FastGelu
 
 
 class MaskDecoderHQ(nn.Module):
@@ -79,19 +79,19 @@ class MaskDecoderHQ(nn.Module):
         self.compress_vit_feat = nn.Sequential(
                                         nn.ConvTranspose2d(vit_dim, transformer_dim, kernel_size=2, stride=2),
                                         LayerNorm2d(transformer_dim),
-                                        nn.GELU(), 
+                                        FastGelu(),
                                         nn.ConvTranspose2d(transformer_dim, transformer_dim // 8, kernel_size=2, stride=2))
         
         self.embedding_encoder = nn.Sequential(
                                         nn.ConvTranspose2d(transformer_dim, transformer_dim // 4, kernel_size=2, stride=2),
                                         LayerNorm2d(transformer_dim // 4),
-                                        nn.GELU(),
+                                        FastGelu(),
                                         nn.ConvTranspose2d(transformer_dim // 4, transformer_dim // 8, kernel_size=2, stride=2),
                                     )
         self.embedding_maskfeature = nn.Sequential(
                                         nn.Conv2d(transformer_dim // 8, transformer_dim // 4, 3, 1, 1), 
                                         LayerNorm2d(transformer_dim // 4),
-                                        nn.GELU(),
+                                        FastGelu(),
                                         nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1))
 
 
@@ -121,7 +121,7 @@ class MaskDecoderHQ(nn.Module):
           torch.Tensor: batched predicted masks
           torch.Tensor: batched predictions of mask quality
         """
-        vit_features = interm_embeddings[0].permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
+        vit_features = interm_embeddings.permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
         hq_features = self.embedding_encoder(image_embeddings) + self.compress_vit_feat(vit_features)
 
         masks, iou_pred = self.predict_masks(

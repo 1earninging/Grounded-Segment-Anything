@@ -261,6 +261,12 @@ class GroundingDINO(nn.Module):
             tokenized_for_encoder = tokenized
 
         bert_output = self.bert(**tokenized_for_encoder)  # bs, 195, 768
+        print("start trace bert model")
+        bert_output = torch.jit.trace(self.bert,(tokenized_for_encoder["input_ids"],
+                                                 tokenized_for_encoder["attention_mask"],
+                                                 tokenized_for_encoder["token_type_ids"],
+                                                 tokenized_for_encoder["position_ids"],))
+        print("save bert model done.")
 
         encoded_text = self.feat_map(bert_output["last_hidden_state"])  # bs, 195, d_model
         text_token_mask = tokenized.attention_mask.bool()  # bs, 195

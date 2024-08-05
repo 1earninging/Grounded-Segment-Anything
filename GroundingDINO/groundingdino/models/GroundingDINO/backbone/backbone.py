@@ -104,11 +104,11 @@ class BackboneBase(nn.Module):
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
-    def forward(self, tensor_list: NestedTensor):
-        xs = self.body(tensor_list.tensors)
+    def forward(self, x, m):
+        xs = self.body(x)
         out: Dict[str, NestedTensor] = {}
         for name, x in xs.items():
-            m = tensor_list.mask
+            # m = tensor_list.mask
             assert m is not None
             mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
             out[name] = NestedTensor(x, mask)
@@ -148,7 +148,17 @@ class Joiner(nn.Sequential):
         super().__init__(backbone, position_embedding)
 
     def forward(self, tensor_list: NestedTensor):
-        xs = self[0](tensor_list)
+        print("start trace backbone")
+        traced_backbone = torch.jit.trace(self[0], (tesnor_list.tensors, tensor_list.mask))
+        traced_backbone.save("traced_backbone.pt")
+        print("save backbone done")
+        outs = self[0](tensor_list)
+        outs_dict = {}
+        for idx, out_i in enumerate(outs):
+            m = tensor_list.mask
+            assert m is not None
+            mask = F.interpolate(m[None].float(), size=out_i.shape[-2:]).to(torch.bool)[0]
+            outs_dict[idx] = NestedTensor(out_i, mask)
         out: List[NestedTensor] = []
         pos = []
         for name, x in xs.items():

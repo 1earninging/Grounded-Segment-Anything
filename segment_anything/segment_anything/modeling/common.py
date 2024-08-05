@@ -41,3 +41,11 @@ class LayerNorm2d(nn.Module):
         x = (x - u) / torch.sqrt(s + self.eps)
         x = self.weight[:, None, None] * x + self.bias[:, None, None]
         return x
+
+
+class FastGelu(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return 0.5 * x *(1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))

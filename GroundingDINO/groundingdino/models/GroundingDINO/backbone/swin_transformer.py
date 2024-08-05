@@ -21,22 +21,27 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from groundingdino.util.misc import NestedTensor
 
 
+def fast_gelu(x):
+    return 0.5 * x *(1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+
+
 class Mlp(nn.Module):
     """Multilayer perceptron."""
 
     def __init__(
-        self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0
+            self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.0
     ):
         super().__init__()
-        out_features = out_features or in_features
+        self.out_features = out_features or in_features
         hidden_features = hidden_features or in_features
         self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.act = fast_gelu
+        self.fc2 = nn.Linear(hidden_features, self.out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        x = self.fc1(x)
+        N, C, D = x.shape
+        x = self.fc1(x.reshape(N * C, D))
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
@@ -68,7 +73,7 @@ def window_reverse(windows, window_size, H, W):
     Returns:
         x: (B, H, W, C)
     """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    B = windows.shape[0] // (H * W // window_size // window_size)
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
@@ -254,7 +259,10 @@ class SwinTransformerBlock(nn.Module):
         pad_l = pad_t = 0
         pad_r = (self.window_size - W % self.window_size) % self.window_size
         pad_b = (self.window_size - H % self.window_size) % self.window_size
-        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+        # x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+        x = x.permute(0, 3, 1, 2)
+        x = torch.constant_pad_nd(x, (pad_l, pad_r, pad_t, pad_b), 0)
+        x = x.permute(0, 2, 3, 1)
         _, Hp, Wp, _ = x.shape
 
         # cyclic shift
@@ -322,10 +330,14 @@ class PatchMerging(nn.Module):
 
         x = x.view(B, H, W, C)
 
+        x = x.permute(0, 3, 1, 2)
+
         # padding
-        pad_input = (H % 2 == 1) or (W % 2 == 1)
-        if pad_input:
-            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+        # pad_input = (H % 2 == 1) or (W % 2 == 1)
+        # if pad_input:
+        #     x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+        x = torch.constant_pad_nd(x, (0, W % 2, 0,  H % 2), 0)
+        x = x.permute(0, 2, 3, 1)
 
         x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
         x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
@@ -414,24 +426,38 @@ class BasicLayer(nn.Module):
         """
 
         # calculate attention mask for SW-MSA
-        Hp = int(np.ceil(H / self.window_size)) * self.window_size
-        Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device, dtype=x.dtype)  # 1 Hp Wp 1
-        h_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        w_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
+        # Hp = int(np.ceil(H / self.window_size)) * self.window_size
+        # Wp = int(np.ceil(W / self.window_size)) * self.window_size
+        # img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device, dtype=x.dtype)  # 1 Hp Wp 1
+        # h_slices = (
+        #     slice(0, -self.window_size),
+        #     slice(-self.window_size, -self.shift_size),
+        #     slice(-self.shift_size, None),
+        # )
+        # w_slices = (
+        #     slice(0, -self.window_size),
+        #     slice(-self.window_size, -self.shift_size),
+        #     slice(-self.shift_size, None),
+        # )
+        # cnt = 0
+        # for h in h_slices:
+        #     for w in w_slices:
+        #         img_mask[:, h, w, :] = cnt
+        #         cnt += 1
+        Hp = (H + self.window_size - 1) // self.window_size * self.window_size
+        Wp = (W + self.window_size - 1) // self.window_size * self.window_size
+        h_fill = [ Hp - self.window_size, self.window_size - self.shift_size, self.shift_size]
+        w_fill = [ Wp - self.window_size, self.window_size - self.shift_size, self.shift_size]
         cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
+        results = []
+        for h in h_fill:
+            result = []
+            for w in w_fill:
+                a = torch.full((1, h, w, 1), cnt, dtype=torch.float, device=x.device)
                 cnt += 1
+                result.append(a)
+            results.append(torch.concat(result, 2))
+        img_mask = torch.concat(results, 1)
 
         mask_windows = window_partition(
             img_mask, self.window_size
@@ -444,10 +470,11 @@ class BasicLayer(nn.Module):
 
         for blk in self.blocks:
             blk.H, blk.W = H, W
-            if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x, attn_mask)
-            else:
-                x = blk(x, attn_mask)
+            # if self.use_checkpoint:
+            #     x = checkpoint.checkpoint(blk, x, attn_mask)
+            # else:
+            #     x = blk(x, attn_mask)
+            x = blk(x, attn_mask)
         if self.downsample is not None:
             x_down = self.downsample(x, H, W)
             Wh, Ww = (H + 1) // 2, (W + 1) // 2
@@ -483,10 +510,11 @@ class PatchEmbed(nn.Module):
         """Forward function."""
         # padding
         _, _, H, W = x.size()
-        if W % self.patch_size[1] != 0:
-            x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
-        if H % self.patch_size[0] != 0:
-            x = F.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
+        # if W % self.patch_size[1] != 0:
+        #     x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
+        # if H % self.patch_size[0] != 0:
+        #     x = F.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
+        x = torch.constant_pad_nd(x, (0, self.patch_size[1] - W % self.patch_size[1], 0, self.patch_size[0] - H % self.patch_size[0]), 0)
 
         x = self.proj(x)  # B C Wh Ww
         if self.norm is not None:
@@ -709,8 +737,8 @@ class SwinTransformer(nn.Module):
         #       torch.Size([2, 768, 64, 64]), torch.Size([2, 1536, 32, 32])]
         return tuple(outs)
 
-    def forward(self, tensor_list: NestedTensor):
-        x = tensor_list.tensors
+    def forward(self, x, m):
+        #x = tensor_list.tensors
 
         """Forward function."""
         x = self.patch_embed(x)
@@ -744,14 +772,14 @@ class SwinTransformer(nn.Module):
         #       torch.Size([2, 768, 64, 64]), torch.Size([2, 1536, 32, 32])]
 
         # collect for nesttensors
-        outs_dict = {}
-        for idx, out_i in enumerate(outs):
-            m = tensor_list.mask
-            assert m is not None
-            mask = F.interpolate(m[None].float(), size=out_i.shape[-2:]).to(torch.bool)[0]
-            outs_dict[idx] = NestedTensor(out_i, mask)
+        # outs_dict = {}
+        # for idx, out_i in enumerate(outs):
+        #     m = tensor_list.mask
+        #     assert m is not None
+        #     mask = F.interpolate(m[None].float(), size=out_i.shape[-2:]).to(torch.bool)[0]
+        #     outs_dict[idx] = NestedTensor(out_i, mask)
 
-        return outs_dict
+        return outs
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""

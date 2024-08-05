@@ -10,7 +10,7 @@ from torch import nn
 
 from typing import Any, Optional, Tuple, Type
 
-from .common import LayerNorm2d
+from .common import LayerNorm2d, FastGelu
 
 
 class PromptEncoder(nn.Module):
@@ -20,7 +20,7 @@ class PromptEncoder(nn.Module):
         image_embedding_size: Tuple[int, int],
         input_image_size: Tuple[int, int],
         mask_in_chans: int,
-        activation: Type[nn.Module] = nn.GELU,
+        activation: Type[nn.Module] = FastGelu,
     ) -> None:
         """
         Encodes prompts for input to SAM's mask decoder.
@@ -51,10 +51,10 @@ class PromptEncoder(nn.Module):
         self.mask_downscaling = nn.Sequential(
             nn.Conv2d(1, mask_in_chans // 4, kernel_size=2, stride=2),
             LayerNorm2d(mask_in_chans // 4),
-            activation(),
+            FastGelu(),
             nn.Conv2d(mask_in_chans // 4, mask_in_chans, kernel_size=2, stride=2),
             LayerNorm2d(mask_in_chans),
-            activation(),
+            FastGelu(),
             nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
         )
         self.no_mask_embed = nn.Embedding(1, embed_dim)
@@ -127,9 +127,9 @@ class PromptEncoder(nn.Module):
 
     def forward(
         self,
-        points: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        # points: Optional[Tuple[torch.Tensor, torch.Tensor]],
         boxes: Optional[torch.Tensor],
-        masks: Optional[torch.Tensor],
+        # masks: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -148,6 +148,8 @@ class PromptEncoder(nn.Module):
           torch.Tensor: dense embeddings for the masks, in the shape
             Bx(embed_dim)x(embed_H)x(embed_W)
         """
+        points = None
+        masks = None
         bs = self._get_batch_size(points, boxes, masks)
         sparse_embeddings = torch.empty((bs, 0, self.embed_dim), device=self._get_device())
         if points is not None:

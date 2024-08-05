@@ -89,6 +89,8 @@ class SamPredictor:
         self.input_size = tuple(transformed_image.shape[-2:])
         input_image = self.model.preprocess(transformed_image)
         self.features, self.interm_features = self.model.image_encoder(input_image)
+        traced_model = torch.jit.trace(self.model.image_encoder, input_image)
+        traced_model.save("image_encoder.ts")
         self.is_image_set = True
 
     def predict(
@@ -225,10 +227,13 @@ class SamPredictor:
 
         # Embed prompts
         sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
-            points=points,
+            # points=points,
             boxes=boxes,
-            masks=mask_input,
+            # masks=mask_input,
         )
+
+        traced_model = torch.jit.trace(self.model.prompt_encoder, boxes)
+        traced_model.save("prompt_encoder.ts")
 
         # Predict masks
         low_res_masks, iou_predictions = self.model.mask_decoder(
@@ -238,8 +243,16 @@ class SamPredictor:
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=multimask_output,
             hq_token_only=hq_token_only,
-            interm_embeddings=self.interm_features,
+            interm_embeddings=self.interm_features[0],
         )
+        traced_model = torch.jit.trace(self.model.mask_decoder, (self.features,
+                                                                 self.model.prompt_encoder.get_dense_pe(),
+                                                                 sparse_embeddings,
+                                                                 dense_embeddings,
+                                                                 torch.tensor([multimask_output]),
+                                                                 torch.tensor([hq_token_only]),
+                                                                 self.interm_features[0]))
+        traced_model.save("mask_decoder.ts")
 
         # Upscale the masks to the original image resolution
         masks = self.model.postprocess_masks(low_res_masks, self.input_size, self.original_size)
